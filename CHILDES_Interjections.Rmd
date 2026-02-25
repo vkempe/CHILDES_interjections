@@ -1,0 +1,371 @@
+---
+title: "CHILDES interjections"
+output:
+  html_document:
+    df_print: paged
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      message = FALSE, 
+                      warning = FALSE)
+```
+
+```{r read libraries}
+library(tidyverse)
+library(childesr)
+library(knitr)
+library(lme4)
+library(lmerTest)
+```
+
+```{r read rds}
+all_utterances_raw           <- readRDS("all_utterances_raw.rds")
+all_interjections_both_clean <- readRDS("all_interjections_both_clean.rds")
+all_speakers_data            <- readRDS("all_speakers_data.rds")
+contingency_data             <- readRDS("contingency_data.rds")
+contingent_interjections     <- readRDS("contingent_interjections.rds")
+interjection_summary_clean   <- readRDS("interjection_summary_clean.rds")
+english_corpora              <- readRDS("english_corpora.rds")
+```
+
+
+```{r extract interjections that are not really interjections, eval = FALSE}
+remove_interjections <- c(
+  # CHAT placeholders
+  "zzz", "xxx", "a", "h", "i", "m", "r", "w", "k", "I",
+  # Nursery rhymes/songs
+  "hickory_dickory_dock", "rock_a_bye", "rock_a_bye_baby", 
+  "ring_around_the_rosie", "ring_a_ring_a_roses", "pattycake", 
+  "patty_cake", "patty_cakes", "patty", "see_saw_marjorie_daw", 
+  "ee_yay_ee_yay_oh", "rub_a_dub_dub", "rub_a_dub", "knick_knack", 
+  "paddy_whack", "this_little_piggie", "hickety+pickety", 
+  "hey_diddle_diddle", "eeny_meeny", "abra_cadabra", "open_sesame",
+  "supercalifragilisticexpialidocious", "yabba_dabba_doo", 
+  "tralala", "tralalalala", "cha_cha_cha", "patty+take",
+  "patty_cakie", "rock_a_bye_baby",
+  # Mistagged common words
+  "that", "that's", "the", "them", "to", "on", "in", "with", 
+  "where", "now", "do", "she", "she's", "you", "it", "me", 
+  "our", "once", "new", "year", "think", "certain", "much", 
+  "formation", "way", "after_all", "however", "truly", 
+  "of_course", "indeed", "perhaps", "fine", "anyway",
+  # Terms of address
+  "darling", "sweetie", "honey", "dear", "sweetheart", "dearie",
+  "babe", "sweeters", "sweety", "sweeta", "toots", "maam",
+  "sweetsa", "sweethuh", "sweetie's", "nana", "mam", "mama_mia",
+  # Sound effects/onomatopoeia
+  "vroom", "boom", "boop", "toot", "whoosh", "splat", "bonk", 
+  "kaboom", "wham", "baa", "achoo", "brr", "grr", "nom", "num",
+  "la", "blah", "ding_a_ling_a_ling", "bleh", "bah", "tsh",
+  "rrrrr", "prrrwr", "psh", "ss", "ttttt", "tttt", "hhh",
+  "nn", "ch", "chh"
+)
+
+extract_interjections <- function(gloss, pos) {
+  words <- str_split(gloss, " ")[[1]]
+  tags  <- str_split(pos,   " ")[[1]]
+  if (length(words) != length(tags)) return(NA_character_)
+  words[tags == "co"]
+}
+```
+
+```{r extract utterances }
+extract_all_utterances <- function(corpus_name) {
+  message("Processing: ", corpus_name)
+  tryCatch({
+    utts <- get_utterances(corpus = corpus_name)
+    
+    utts %>%
+      filter(!is.na(target_child_age),
+             round(target_child_age) <= 72) %>%
+      mutate(age_months = round(target_child_age),
+             SpeakerType = if_else(speaker_code == "CHI", "CHI", "non-CHI")) %>%
+      arrange(transcript_id, utterance_order) %>%
+      group_by(transcript_id) %>%
+      mutate(
+        prev_speaker     = lag(speaker_code),
+        prev_speakertype = lag(SpeakerType),
+        has_co           = str_detect(part_of_speech, "\\bco\\b"),
+        initial_co       = str_starts(part_of_speech, "co")
+      ) %>%
+      ungroup() %>%
+      select(transcript_id, corpus_name, target_child_name,
+             age_months, speaker_code, SpeakerType,
+             utterance_order, gloss, part_of_speech,
+             has_co, initial_co, prev_speaker, prev_speakertype)
+  }, error = function(e) {
+    message("Error in ", corpus_name, ": ", e$message)
+    NULL
+  })
+}
+
+all_utterances_raw <- map_dfr(english_corpora$corpus_name, extract_all_utterances)
+```
+
+
+```{r extract interjections and previous utterances}
+# Extract individual interjection words (replaces all_interjections_both_clean)
+all_interjections_both_clean <- all_utterances_raw %>%
+  filter(has_co) %>%
+  mutate(
+    words = str_split(gloss, " "),
+    tags  = str_split(part_of_speech, " "),
+    interjection = map2(words, tags, ~ .x[.y == "co"])
+  ) %>%
+  unnest(interjection) %>%
+  filter(!is.na(interjection),
+         !interjection %in% remove_interjections) %>%
+  select(transcript_id, corpus_name, target_child_name,
+         age_months, speaker_code, SpeakerType, interjection)
+
+# Session-level summary (replaces all_speakers_data)
+all_speakers_data <- all_utterances_raw %>%
+  group_by(transcript_id) %>%
+  mutate(session_length = n()) %>%
+  ungroup() %>%
+  group_by(transcript_id, corpus_name, target_child_name,
+           age_months, SpeakerType) %>%
+  summarise(
+    total_utterances = n(),
+    n_interjections  = sum(has_co, na.rm = TRUE),
+    session_length   = first(session_length),
+    .groups = "drop"
+  ) %>%
+  mutate(PropIntrj = n_interjections / total_utterances)
+
+# Contingency summary (new)
+contingency_data <- all_utterances_raw %>%
+  filter(
+    (SpeakerType == "non-CHI" & prev_speakertype == "CHI") |
+    (SpeakerType == "CHI"     & prev_speakertype %in% c("CHI", "non-CHI"))
+  ) %>%
+  group_by(transcript_id) %>%
+  mutate(session_length = n()) %>%
+  ungroup() %>%
+  group_by(transcript_id, corpus_name, target_child_name,
+           age_months, SpeakerType) %>%
+  summarise(
+    total_utterances = n(),
+    n_initial_co     = sum(initial_co, na.rm = TRUE),
+    session_length   = first(session_length),
+    .groups = "drop"
+  ) %>%
+  mutate(PropIntrj = n_initial_co / total_utterances)
+
+# Interjection summary for caregiver plot (replaces interjection_summary_clean)
+interjection_summary_clean <- all_speakers_data %>%
+  filter(SpeakerType == "non-CHI") %>%
+  rename(proportion = PropIntrj)
+
+contingent_interjections <- all_utterances_raw %>%
+  filter(
+    initial_co == TRUE,
+    !is.na(age_months),
+    age_months <= 72,
+    (SpeakerType == "non-CHI" & prev_speakertype == "CHI") |
+    (SpeakerType == "CHI"     & prev_speakertype %in% c("CHI", "non-CHI"))
+  ) %>%
+  mutate(
+    words = str_split(gloss, " "),
+    tags  = str_split(part_of_speech, " "),
+    interjection = map2(words, tags, ~ .x[.y == "co"])
+  ) %>%
+  unnest(interjection) %>%
+  filter(!is.na(interjection),
+         !interjection %in% remove_interjections) %>%
+  select(transcript_id, corpus_name, target_child_name,
+         age_months, speaker_code, SpeakerType, interjection)
+```
+
+
+
+```{r save all rds, eval=FALSE}
+saveRDS(all_utterances_raw,           "all_utterances_raw.rds")
+saveRDS(all_interjections_both_clean, "all_interjections_both_clean.rds")
+saveRDS(all_speakers_data,            "all_speakers_data.rds")
+saveRDS(contingency_data,             "contingency_data.rds")
+saveRDS(contingent_interjections,     "contingent_interjections.rds")
+saveRDS(interjection_summary_clean,   "interjection_summary_clean.rds")
+saveRDS(english_corpora,              "english_corpora.rds")
+```
+
+
+```{r total proportion of interjections}
+interjection_summary_clean %>%
+  filter(!is.na(age_months), age_months <= 72) %>%
+  summarise(
+    total_interjections = sum(n_interjections),
+    total_utterances = sum(total_utterances),
+    proportion = total_interjections / total_utterances
+  )
+```
+
+```{r plot interjections by main caregiver}
+role_codes <- c("MOT", "FAT", "DAD", "MOM", "INV", "SIS", "BRO", 
+                "GRA", "GMA", "AUN", "UNC")
+
+interlocutor_plot <- all_utterances_raw %>%
+  filter(!is.na(age_months), age_months <= 72,
+         SpeakerType == "non-CHI",
+         speaker_code %in% role_codes) %>%
+  mutate(speaker_code = recode(speaker_code, 
+                                "DAD" = "FAT", 
+                                "MOM" = "MOT")) %>%
+  group_by(transcript_id, corpus_name, target_child_name,
+           age_months, speaker_code) %>%
+  summarise(
+    total_utterances = n(),
+    n_interjections  = sum(has_co, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(PropIntrj = n_interjections / total_utterances) %>%
+  group_by(speaker_code) %>%
+  summarise(
+    mean_proportion  = mean(PropIntrj),
+    se               = sd(PropIntrj) / sqrt(n()),
+    n_sessions       = n(),
+    n_utterances     = sum(total_utterances),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_proportion))
+
+ggplot(interlocutor_plot, 
+       aes(x = reorder(speaker_code, mean_proportion), 
+           y = mean_proportion)) +
+  geom_col(fill = "#2dd4bf", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_proportion - se, 
+                    ymax = mean_proportion + se),
+                width = 0.3, colour = "white") +
+  geom_text(aes(label = paste0("n=", scales::comma(n_utterances))), 
+            hjust = -0.2, size = 3, colour = "grey60") +
+  coord_flip() +
+  scale_y_continuous("Mean proportion of turns with interjection",
+                     limits = c(0, 0.45)) +
+  scale_x_discrete("Interlocutor") +
+  theme_minimal(base_size = 13) +
+  labs(title = "Caregiver interjection use by interlocutor",
+       subtitle = "Children aged 0-72 months, English CHILDES corpora")
+```
+
+
+```{r regression models total turns with interjections }
+# Fit model
+
+model_mixed <- lmer(PropIntrj ~ SpeakerType * age_months + session_length + 
+                      (1 | corpus_name/target_child_name), 
+                    data = all_speakers_data)
+
+summary(model_mixed)
+
+all_speakers_data <- all_speakers_data %>%
+  mutate(SpeakerType = relevel(factor(SpeakerType), ref = "non-CHI"))
+
+model_releveled <- lmer(PropIntrj ~ SpeakerType * age_months + session_length + 
+                          (1 | corpus_name/target_child_name), 
+                        data = all_speakers_data)
+
+summary(model_releveled)
+```
+```{r plot proportion of interjections by age and speaker type}
+ggplot(all_speakers_data, 
+       aes(x = age_months, y = PropIntrj, colour = SpeakerType)) +
+  geom_point(alpha = 0.1, size = 0.3) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1.2) +
+  scale_colour_manual(values = c("CHI" = "#f472b6", "non-CHI" = "#2dd4bf")) +
+  scale_x_continuous("Child age (months)") +
+  scale_y_continuous("Proportion of turns with interjection") +
+  theme_minimal(base_size = 13) +
+  labs(title = "Interjection use by speaker type across development",
+       subtitle = "English CHILDES corpora, 0-72 months",
+       colour = "Speaker")
+```
+
+
+
+```{r 10 top interjections for adults and children}
+# Get top 10 overall across both speaker types combined
+top10_overall <- all_interjections_both_clean %>%
+  filter(!is.na(age_months), age_months <= 72) %>%
+  count(interjection, sort = TRUE) %>%
+  slice_head(n = 10) %>%
+  pull(interjection)
+
+# Get counts for those interjections by speaker type
+top10_combined <- all_interjections_both_clean %>%
+  filter(!is.na(age_months), age_months <= 72,
+         interjection %in% top10_overall) %>%
+  mutate(SpeakerType = if_else(speaker_code == "CHI", "CHI", "non-CHI")) %>%
+  group_by(SpeakerType, interjection) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(top10_combined,
+       aes(x = reorder(interjection, n), y = n, fill = SpeakerType)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("CHI" = "#f472b6", "non-CHI" = "#2dd4bf")) +
+  scale_y_continuous(labels = scales::comma) +
+  xlab("Interjection") +
+  ylab("Number of tokens") +
+  theme_minimal(base_size = 13) +
+  labs(title = "Top 10 interjections by speaker type",
+       subtitle = "Children aged 0-72 months, English CHILDES corpora",
+       fill = "Speaker")
+```
+
+```{r regression models contingent interjections}
+model_contingency <- lmer(PropIntrj ~ SpeakerType * age_months + session_length + 
+                      (1 | corpus_name/target_child_name), 
+                    data = contingency_data)
+summary(model_contingency)
+
+contingency_data <- contingency_data %>%
+  mutate(SpeakerType = relevel(factor(SpeakerType), ref = "non-CHI"))
+
+model_contingency_releveled <- lmer(PropIntrj ~ SpeakerType * age_months + session_length + 
+                          (1 | corpus_name/target_child_name), 
+                        data = contingency_data)
+summary(model_contingency_releveled)
+```
+```{r plot contingent interjections}
+ggplot(contingency_data, 
+       aes(x = age_months, y = PropIntrj, colour = SpeakerType)) +
+  geom_point(alpha = 0.1, size = 0.3) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1.2) +
+  scale_colour_manual(values = c("CHI" = "#f472b6", "non-CHI" = "#2dd4bf")) +
+  scale_x_continuous("Child age (months)") +
+  scale_y_continuous("Proportion of turn-initial interjections") +
+  theme_minimal(base_size = 13) +
+  labs(title = "Turn-initial interjections following child utterances",
+       subtitle = "English CHILDES corpora, 0-72 months",
+       colour = "Speaker")
+```
+```{r plot top 10 contingency interjections}
+# Top 10 overall
+top10_contingency <- contingent_interjections %>%
+  filter(!is.na(age_months), age_months <= 72) %>%
+  count(interjection, sort = TRUE) %>%
+  slice_head(n = 10) %>%
+  pull(interjection)
+
+# Counts by speaker type
+top10_contingency_combined <- contingent_interjections %>%
+  filter(!is.na(age_months), age_months <= 72,
+         interjection %in% top10_contingency) %>%
+  group_by(SpeakerType, interjection) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(top10_contingency_combined,
+       aes(x = reorder(interjection, n), y = n, fill = SpeakerType)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("CHI" = "#f472b6", "non-CHI" = "#2dd4bf")) +
+  scale_y_continuous(labels = scales::comma) +
+  xlab("Interjection") +
+  ylab("Number of tokens") +
+  theme_minimal(base_size = 13) +
+  labs(title = "Top 10 contingent interjections by speaker type",
+       subtitle = "Children aged 0-72 months, English CHILDES corpora",
+       fill = "Speaker")
+```
+Elmlinger et al. (2019) showed that caregivers' contingent responses to children are simpler and more repetitive than non-contingent speech. A turn-initial interjection is about as simple as it gets — it's a single minimal response token that acknowledges the child's utterance before anything else.
+The 31% figure from your model intercept for non-CHI is striking — nearly a third of all caregiver responses to children open with an interjection. That fits perfectly with the Elmlinger framework and also connects to the robot application: if the robot needs processing time after a child utterance, deploying a turn-initial interjection like oh or yeah is exactly what a human caregiver would do in that position.
