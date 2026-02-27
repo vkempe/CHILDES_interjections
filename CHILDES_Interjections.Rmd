@@ -153,7 +153,7 @@ exclude <- c(
   "please", "sorry", "thank_you", "thanks",
   "look", "see", "say", "wait", "help",
   "my", "silly", "careful",
-  "yyy"
+  "yyy", "xxx", "zzz"
 )
 
 # Step 3: Frequency table and whitelist
@@ -221,7 +221,7 @@ all_speakers_data <- all_utterances_clean %>%
 contingency_data <- all_utterances_clean %>%
   filter(
     (SpeakerType == "non-CHI" & prev_speakertype == "CHI") |
-    (SpeakerType == "CHI"     & prev_speakertype %in% c("CHI", "non-CHI"))
+    (SpeakerType == "CHI"     & prev_speakertype %in% c("non-CHI"))
   ) %>%
   group_by(transcript_id) %>%
   mutate(session_length = n()) %>%
@@ -415,20 +415,20 @@ contingency_data <- contingency_data %>%
   mutate(age_c = age_months - mean(age_months, na.rm = TRUE),
          session_length_s = scale(session_length))
 
-model_contingency_quad <- lmer(PropIntrj ~ SpeakerType * poly(age_c, 3) + session_length_s + 
+model_contingency_cub <- lmer(PropIntrj ~ SpeakerType * poly(age_c, 3) + session_length_s + 
                      (1 | corpus_name/target_child_name), 
                    data = contingency_data)
 
-summary(model_contingency_quad)
+summary(model_contingency_cub)
 
 contingency_data <- contingency_data %>%
   mutate(SpeakerType = relevel(factor(SpeakerType), ref = "non-CHI"))
 
-model_contingency_quad_releveled <- lmer(PropIntrj ~ SpeakerType * poly(age_c, 3) + session_length_s + 
+model_contingency_cub_releveled <- lmer(PropIntrj ~ SpeakerType * poly(age_c, 3) + session_length_s + 
                      (1 | corpus_name/target_child_name), 
                    data = contingency_data)
 
-summary(model_contingency_quad_releveled)
+summary(model_contingency_cub_releveled)
 
 ```
 
@@ -449,7 +449,7 @@ ggplot(contingency_data,
 
 ```{r plot model-estimated proportions of contingent interjections}
 
-pred <- ggpredict(model_contingency_quad, terms = c("age_c [all]", "SpeakerType"))
+pred <- ggpredict(model_contingency_cub, terms = c("age_c [all]", "SpeakerType"))
 
 mean_age <- mean(contingency_data$age_months, na.rm = TRUE)
 pred$age_months <- pred$x + mean_age
@@ -504,3 +504,229 @@ ggplot(top10_contingency_combined,
 ```
 Elmlinger et al. (2019) showed that caregivers' contingent responses to children are simpler and more repetitive than non-contingent speech. A turn-initial interjection is about as simple as it gets — it's a single minimal response token that acknowledges the child's utterance before anything else.
 Nearly 18% all caregiver responses to children open with an interjection. That fits perfectly with the Elmlinger framework and also connects to the robot application: if the robot needs processing time after a child utterance, deploying a turn-initial interjection like oh or yeah is exactly what a human caregiver would do in that position.
+
+```{r plot to 5 non-CHI contingent interjections by age}
+# Get the consolidated first_co_word for each utterance
+first_co_lookup <- all_interjections_raw %>%
+  filter(first_co_is_initial, first_co_word %in% whitelist) %>%
+  distinct(transcript_id, utterance_order, first_co_word)
+
+# Contingent non-CHI utterances with their initial interjection
+contingent_initial <- all_utterances_clean %>%
+  filter(SpeakerType == "non-CHI",
+         prev_speakertype == "CHI",
+         initial_co_clean) %>%
+  left_join(first_co_lookup, by = c("transcript_id", "utterance_order"))
+
+# Top 5
+top5 <- contingent_initial %>%
+  count(first_co_word, sort = TRUE) %>%
+  slice_head(n = 5) %>%
+  pull(first_co_word)
+
+# Denominator: total contingent non-CHI utterances per transcript
+contingent_nonchi_totals <- all_utterances_clean %>%
+  filter(SpeakerType == "non-CHI", prev_speakertype == "CHI") %>%
+  count(transcript_id, age_months, name = "n_contingent")
+
+# Rate per transcript
+top5_cont_by_age <- contingent_initial %>%
+  filter(first_co_word %in% top5) %>%
+  count(transcript_id, age_months, first_co_word, name = "n_initial") %>%
+  left_join(contingent_nonchi_totals, by = c("transcript_id", "age_months")) %>%
+  mutate(rate = n_initial / n_contingent)
+
+# Plot
+ggplot(top5_cont_by_age, aes(x = age_months, y = rate, colour = first_co_word)) +
+  geom_smooth(method = "loess", se = FALSE) +
+  labs(x = "Child age (months)",
+       y = "Proportion of contingent non-CHI utterances",
+       colour = "Interjection",
+       title = "Top 5 non-CHI turn-initial interjections in contingent turns") +
+  theme_minimal()
+```
+The pattern is interesting: yeah dominates with very young children (~25% of contingent turns) then drops sharply as children become more verbal. That's a pure acknowledgment/backchannel — caregivers saying "yeah" to pre-verbal babbling. As children start producing real utterances, caregivers shift to more substantive responses and the interjection types converge around 5-7%.
+oh shows a slight U-shape — drops early, then rises again with older children. Possibly reflects a shift in function: from reactive ("oh!") with infants to epistemic marking ("oh, you mean...") with older children.
+no holds steady around 5-6% throughout — consistent with it serving a regulatory function rather than a contingency device.
+Good for the robot application: for younger children, lead with "yeah"; for older children, "oh" becomes more appropriate.
+
+```{r plot to 5 CHI contingent interjections by age}
+# Get the consolidated first_co_word for each utterance
+first_co_lookup <- all_interjections_raw %>%
+  filter(first_co_is_initial, first_co_word %in% whitelist) %>%
+  distinct(transcript_id, utterance_order, first_co_word)
+
+# Contingent CHI utterances with their initial interjection
+contingent_initial_chi <- all_utterances_clean %>%
+  filter(SpeakerType == "CHI",
+         prev_speakertype %in% c("non-CHI"),
+         initial_co_clean) %>%
+  left_join(first_co_lookup, by = c("transcript_id", "utterance_order"))
+
+# Top 5
+top5_chi <- contingent_initial_chi %>%
+  count(first_co_word, sort = TRUE) %>%
+  slice_head(n = 5) %>%
+  pull(first_co_word)
+
+# Denominator: total contingent CHI utterances per transcript
+contingent_chi_totals <- all_utterances_clean %>%
+  filter(SpeakerType == "CHI",
+         prev_speakertype %in% c("non-CHI")) %>%
+  count(transcript_id, age_months, name = "n_contingent")
+
+# Rate per transcript
+top5_chi_by_age <- contingent_initial_chi %>%
+  filter(first_co_word %in% top5_chi) %>%
+  count(transcript_id, age_months, first_co_word, name = "n_initial") %>%
+  left_join(contingent_chi_totals, by = c("transcript_id", "age_months")) %>%
+  mutate(rate = n_initial / n_contingent)
+
+# Plot
+ggplot(top5_chi_by_age, aes(x = age_months, y = rate, colour = first_co_word)) +
+  geom_smooth(method = "loess", se = FALSE) +
+  labs(x = "Child age (months)",
+       y = "Proportion of contingent CHI utterances",
+       colour = "Interjection",
+       title = "Top 5 CHI turn-initial interjections in contingent turns") +
+  theme_minimal()
+```
+#What triggers interjections?
+```{r compare interjection vs. no-interjection preceding utterances}
+# What precedes and follows non-CHI contingent interjections?
+contingent_context <- all_utterances_clean %>%
+  arrange(transcript_id, utterance_order) %>%
+  group_by(transcript_id) %>%
+  mutate(
+    next_speaker    = lead(SpeakerType),
+    next_initial_co = lead(initial_co_clean),
+    next_gloss      = lead(gloss),
+    next_n_words    = lengths(str_split(lead(gloss), " "))
+  ) %>%
+  ungroup() %>%
+  filter(SpeakerType == "CHI",
+         next_speaker == "non-CHI") %>%
+  mutate(
+    # Properties of the CHILD utterance
+    child_n_words      = lengths(str_split(gloss, " ")),
+    child_unintellig   = str_detect(gloss, "\\bxxx\\b|\\byyy\\b"),
+    child_one_word     = child_n_words == 1,
+    child_question     = str_detect(gloss, "\\?"),
+    # Properties of the CAREGIVER response
+    intj_response      = next_initial_co,
+    caregiver_n_words  = next_n_words,
+    # Is the interjection the ENTIRE response?
+    caregiver_only_intj = next_initial_co & caregiver_n_words == 1
+  )
+
+# Compare child utterances that DO vs DON'T trigger interjections
+contingent_context %>%
+  group_by(intj_response) %>%
+  summarise(
+    n = n(),
+    mean_child_length     = mean(child_n_words, na.rm = TRUE),
+    prop_unintelligible   = mean(child_unintellig, na.rm = TRUE),
+    prop_one_word         = mean(child_one_word, na.rm = TRUE),
+    mean_caregiver_length = mean(caregiver_n_words, na.rm = TRUE),
+    prop_intj_only        = mean(caregiver_only_intj, na.rm = TRUE)
+  ) %>%
+  pivot_longer(-intj_response, names_to = "measure") %>%
+  pivot_wider(names_from = intj_response, names_prefix = "intj_") %>%
+  rename(no_intj = intj_FALSE, intj = intj_TRUE) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+```
+
+
+```{r bridge pattern}
+# Length of turns after interjection 
+contingent_context %>%
+  filter(intj_response, !caregiver_only_intj) %>%
+  summarise(
+    n = n(),
+    mean_child_length     = mean(child_n_words, na.rm = TRUE),
+    prop_unintelligible   = mean(child_unintellig, na.rm = TRUE),
+    mean_caregiver_length = mean(caregiver_n_words, na.rm = TRUE)
+  )
+
+```
+So the bridge pattern is: child says something relatively substantial or unintelligible → caregiver opens with interjection → follows with a longer-than-average response. That's scaffolding — the caregiver needs more processing time for a more complex response, and the interjection buys that time.
+This is exactly the robot use case. The robot's workflow would be: child speaks → robot deploys "oh" or "yeah" → processes → delivers substantive response of ~5 words.
+
+```{r compare interjection-only vs. interjection+words turs of non-CHI}
+contingent_context %>%
+  filter(intj_response) %>%
+  mutate(response_type = if_else(caregiver_only_intj, 
+                                  "intj_only", "intj_plus")) %>%
+  group_by(response_type) %>%
+  summarise(
+    n = n(),
+    mean_child_length     = mean(child_n_words, na.rm = TRUE),
+    prop_unintelligible   = mean(child_unintellig, na.rm = TRUE),
+    prop_one_word         = mean(child_one_word, na.rm = TRUE),
+    mean_caregiver_length = mean(caregiver_n_words, na.rm = TRUE)
+  ) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+```
+
+Interjection-only follows shorter, more one-word child utterances. Interjection-plus follows longer child utterances. That's exactly what you'd predict: child says something brief → caregiver acknowledges with just "mhm" (nothing more to say). Child says something more substantive → caregiver opens with "oh" then continues with a real response.
+This supports a dual-function account:
+
+Interjection-only = contingency maintenance (child gave little to work with)
+Interjection + continuation = processing bridge (child gave more, caregiver needs time to formulate)
+
+Both are useful for the robot but for different reasons. Short/unintelligible child input → robot says "mhm" and waits. Longer child input → robot says "oh" while processing, then responds.
+
+```{r single vs. multi-word interjections}
+# Get caregiver contingent turns with their initial interjection
+caregiver_contingent <- all_utterances_clean %>%
+  filter(SpeakerType == "non-CHI",
+         prev_speakertype == "CHI",
+         initial_co_clean) %>%
+  left_join(
+    all_interjections_raw %>%
+      filter(first_co_is_initial, first_co_word %in% whitelist) %>%
+      distinct(transcript_id, utterance_order, first_co_word),
+    by = c("transcript_id", "utterance_order")
+  ) %>%
+  filter(first_co_word %in% whitelist) %>%
+  mutate(
+    n_words = lengths(str_split(gloss, " ")),
+    response_type = if_else(n_words == 1, "intj_only", "intj_plus")
+  )
+
+caregiver_contingent %>%
+  count(first_co_word, response_type) %>%
+  group_by(first_co_word) %>%
+  mutate(total = sum(n),
+         prop_only = n / total) %>%
+  filter(response_type == "intj_only") %>%
+  arrange(desc(total)) %>%
+  select(first_co_word, total, n_only = n, prop_only) %>%
+  mutate(prop_only = round(prop_only, 3))
+```
+```{r}
+library(ggrepel)
+
+intj_function <- caregiver_contingent %>%
+  count(first_co_word, response_type) %>%
+  group_by(first_co_word) %>%
+  mutate(total = sum(n),
+         prop_only = n / total) %>%
+  filter(response_type == "intj_only") %>%
+  ungroup()
+
+ggplot(intj_function, aes(x = total, y = prop_only, label = first_co_word)) +
+  geom_point() +
+  geom_text_repel(size = 3) +
+  labs(x = "Total contingent turn-initial uses",
+       y = "Proportion standalone (interjection-only turns)",
+       title = "Interjection frequency vs. standalone use in contingent turns") +
+  theme_minimal()
+```
+The pattern is really clear:
+"oh" is the bridge interjection — most frequent (75k uses) and standalone only 28% of the time. 72% of the time caregivers say "oh" and then continue with something else. That's WordMate's go-to processing bridge.
+"mhm", "yeah", "yes", "no" are acknowledgment interjections — high frequency, standalone 60-80% of the time. Pure contingency maintenance.
+"um" is never standalone (0%) — it's always a hesitation marker opening a longer turn. True filled pause.
+"huh" is almost always standalone (~88%) — it's a repair initiator, not a bridge.
+Nice functional taxonomy emerging just from this one variable. For WordMate we want two modes: acknowledgment mode (yeah/mhm, standalone) and bridge mode (oh/um + continuation).
+

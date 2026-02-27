@@ -219,7 +219,7 @@ french_speakers_data <- french_utterances_clean %>%
 french_contingency_data <- french_utterances_clean %>%
   filter(
     (SpeakerType == "non-CHI" & prev_speakertype == "CHI") |
-    (SpeakerType == "CHI"     & prev_speakertype %in% c("CHI", "non-CHI"))
+    (SpeakerType == "CHI"     & prev_speakertype %in% c("non-CHI"))
   ) %>%
   group_by(transcript_id) %>%
   mutate(session_length = n()) %>%
@@ -291,18 +291,18 @@ french_speakers_data <- french_speakers_data %>%
   mutate(age_c = age_months - mean(age_months, na.rm = TRUE),
          session_length_s = scale(session_length))
 
-french_model_quad <- lmer(PropIntrj ~ SpeakerType * poly(age_c, 3) + session_length_s +
+french_model_cub <- lmer(PropIntrj ~ SpeakerType * poly(age_c, 3) + session_length_s +
                             (1 | corpus_name/target_child_name),
                           data = french_speakers_data)
-summary(french_model_quad)
+summary(french_model_cub)
 
 french_speakers_data <- french_speakers_data %>%
   mutate(SpeakerType = relevel(factor(SpeakerType), ref = "non-CHI"))
 
-french_model_quad_releveled <- lmer(PropIntrj ~ SpeakerType * poly(age_c, 3) + session_length_s +
+french_model_cub_releveled <- lmer(PropIntrj ~ SpeakerType * poly(age_c, 3) + session_length_s +
                                       (1 | corpus_name/target_child_name),
                                     data = french_speakers_data)
-summary(french_model_quad_releveled)
+summary(french_model_cub_releveled)
 ```
 
 ```{r plot French turn data raw}
@@ -322,7 +322,7 @@ ggplot(french_speakers_data,
 
 ```{r plot model-estimated proportions of interjections - French}
 
-pred <- ggpredict(french_model_quad, terms = c("age_c [all]", "SpeakerType"))
+pred <- ggpredict(french_model_cub, terms = c("age_c [all]", "SpeakerType"))
 
 mean_age <- mean(french_speakers_data$age_months, na.rm = TRUE)
 pred$age_months <- pred$x + mean_age
@@ -381,18 +381,18 @@ french_contingency_data <- french_contingency_data %>%
   mutate(age_c = age_months - mean(age_months, na.rm = TRUE),
          session_length_s = scale(session_length))
 
-french_model_contingency_quad <- lmer(PropIntrj ~ SpeakerType * poly(age_c, 2) + session_length_s +
+french_model_contingency_cub <- lmer(PropIntrj ~ SpeakerType * poly(age_c, 3) + session_length_s +
                                         (1 | corpus_name/target_child_name),
                                       data = french_contingency_data)
-summary(french_model_contingency_quad)
+summary(french_model_contingency_cub)
 
 french_contingency_data <- french_contingency_data %>%
   mutate(SpeakerType = relevel(factor(SpeakerType), ref = "non-CHI"))
 
-french_model_contingency_quad_releveled <- lmer(PropIntrj ~ SpeakerType * poly(age_c, 2) + session_length_s +
+french_model_contingency_cub_releveled <- lmer(PropIntrj ~ SpeakerType * poly(age_c, 3) + session_length_s +
                                                    (1 | corpus_name/target_child_name),
                                                  data = french_contingency_data)
-summary(french_model_contingency_quad_releveled)
+summary(french_model_contingency_cub_releveled)
 
 ```
 
@@ -414,7 +414,7 @@ ggplot(french_contingency_data,
 
 ```{r plot model-estimated proportions of contingent interjections - French}
 
-pred <- ggpredict(french_model_contingency_quad, terms = c("age_c [all]", "SpeakerType"))
+pred <- ggpredict(french_model_contingency_cub, terms = c("age_c [all]", "SpeakerType"))
 
 mean_age <- mean(french_speakers_data$age_months, na.rm = TRUE)
 pred$age_months <- pred$x + mean_age
@@ -438,7 +438,6 @@ scale_fill_manual(name = "Speaker", values = c("CHI" = "red", "non-CHI" = "blue"
 
 From the releveled model: intercept = 0.229, so about 23% of French caregiver contingent turns open with an interjection.
 That's higher than English (18%). Interesting — French caregivers are more likely to open a response to a child with an interjection than English caregivers. Could reflect the role of "ah", "oh", "hein" as conversational backchannels being more frequent in French interaction style.
-
 
 The convergence isn't just children rising to adult level — it's both trajectories moving toward each other. Adults are decreasing their interjection rate as children age while children are increasing theirs. So the meeting point reflects two processes:
 
@@ -624,34 +623,45 @@ japanese_whitelist <- japanese_intj_freq %>%
 cat("Japanese whitelist (85%):", length(japanese_whitelist), "items\n")
 cat(japanese_whitelist, sep = ", ")
 ```
-```{r aggregate}
+```{r aggregate }
 # Set whitelist
 japanese_whitelist <- japanese_intj_freq %>%
   filter(lag(cum_prop, default = 0) < 0.85) %>%
   pull(interjection)
 
-# Rebuild has_co_clean and initial_co_clean from whitelist
-japanese_clean <- japanese_raw %>%
+# Vectorized: find utterances with whitelisted interjections
+japanese_tagged <- japanese_raw %>% filter(part_of_speech != "")
+
+japanese_co_tokens <- japanese_tagged %>%
+  filter(str_detect(part_of_speech, "\\bco(:|\\b)")) %>%
+  select(transcript_id, utterance_order, gloss, part_of_speech) %>%
   mutate(
     words = str_split(gloss, " "),
-    tags  = str_split(part_of_speech, " "),
-    co_tokens = map2(words, tags, ~ {
-      idx <- which(str_detect(.y, "^co(:|$)"))
-      consolidate_japanese(.x[idx])
-    }),
-    has_co_clean = map_lgl(co_tokens, ~ any(.x %in% japanese_whitelist)),
-    first_clean_token = map_chr(words, tags, .f = function(w, t) {
-      idx <- which(str_detect(t, "^co(:|$)"))
-      if (length(idx) == 0) return(NA_character_)
-      consolidated <- consolidate_japanese(w[idx])
-      match <- which(consolidated %in% japanese_whitelist)
-      if (length(match) > 0) consolidated[match[1]] else NA_character_
-    }),
-    initial_co_clean = map2_lgl(words, tags, ~ {
-      if (length(.y) == 0) return(FALSE)
-      if (!str_detect(.y[1], "^co(:|$)")) return(FALSE)
-      consolidate_japanese(.x[1]) %in% japanese_whitelist
-    })
+    tags  = str_split(part_of_speech, " ")
+  ) %>%
+  filter(lengths(words) == lengths(tags)) %>%   # drop mismatched rows
+  unnest(c(words, tags)) %>%
+  filter(str_detect(tags, "^co(:|$)")) %>%
+  mutate(words = consolidate_japanese(words)) %>%
+  filter(words %in% japanese_whitelist)
+
+utt_with_co <- japanese_co_tokens %>%
+  distinct(transcript_id, utterance_order)
+
+japanese_initial <- japanese_tagged %>%
+  filter(str_detect(part_of_speech, "^co(:|$)")) %>%
+  mutate(first_word = str_extract(gloss, "^\\S+"),
+         first_word = consolidate_japanese(first_word)) %>%
+  filter(first_word %in% japanese_whitelist) %>%
+  distinct(transcript_id, utterance_order)
+
+# Build clean dataset with flags on ALL utterances
+japanese_clean <- japanese_raw %>%
+  mutate(
+    has_co_clean = paste(transcript_id, utterance_order) %in%
+      paste(utt_with_co$transcript_id, utt_with_co$utterance_order),
+    initial_co_clean = paste(transcript_id, utterance_order) %in%
+      paste(japanese_initial$transcript_id, japanese_initial$utterance_order)
   )
 
 # All speakers data
@@ -661,31 +671,63 @@ japanese_speakers <- japanese_clean %>%
   summarise(
     n_utt = n(),
     n_co = sum(has_co_clean),
-    prop_co = n_co / n_utt,
+    PropIntrj = n_co / n_utt,
     .groups = "drop"
   )
 
-# Contingency data (non-CHI utterance following CHI utterance)
+# Contingency data
 japanese_contingent <- japanese_clean %>%
   group_by(transcript_id) %>%
   arrange(utterance_order) %>%
   mutate(
-    prev_speaker = lag(SpeakerType),
-    is_contingent = SpeakerType == "Non-CHI" & prev_speaker == "CHI"
+    prev_speakertype = lag(SpeakerType)
   ) %>%
   ungroup() %>%
-  filter(is_contingent) %>%
+  filter(
+    (SpeakerType == "non-CHI" & prev_speakertype == "CHI") |
+    (SpeakerType == "CHI"     & prev_speakertype %in% c("CHI", "non-CHI"))
+  ) %>%
+  group_by(transcript_id) %>%
+  mutate(session_length = n()) %>%
+  ungroup() %>%
   group_by(transcript_id, corpus_name, target_child_name,
-           age_months) %>%
+           age_months, SpeakerType) %>%
   summarise(
-    n_contingent = n(),
-    n_initial_co = sum(initial_co_clean),
-    prop_initial_co = n_initial_co / n_contingent,
+    total_utterances = n(),
+    n_initial_co     = sum(initial_co_clean),
+    session_length   = first(session_length),
     .groups = "drop"
-  )
+  ) %>%
+  mutate(PropIntrj = n_initial_co / total_utterances)
+```
 
 
+```{r}
+japanese_speakers %>% 
+  group_by(SpeakerType) %>%
+  summarise(n = n(), n_children = n_distinct(target_child_name),
+            min_age = min(age_months), max_age = max(age_months))
 ```
 
 
 
+```{r regression models total turns with interjections - Japanese }
+# Fit model
+japanese_speakers <- japanese_speakers %>%
+  mutate(session_length_s = as.numeric(scale(n_utt)))
+
+model_cubic_japanese <- lmer(PropIntrj ~ SpeakerType * poly(age_months, 3) + session_length_s + 
+                     (1 | corpus_name/target_child_name), 
+                   data = japanese_speakers)
+summary(model_cubic_japanese)
+
+japanese_speakers <- japanese_speakers %>%
+  mutate(SpeakerType = relevel(factor(SpeakerType), ref = "non-CHI"))
+
+model_cubic_releveled_japanese <- lmer(PropIntrj ~ SpeakerType * poly(age_months, 3) + session_length_s + 
+                     (1 | corpus_name/target_child_name), 
+                   data = japanese_speakers)
+summary(model_cubic_releveled_japanese)
+```
+
+The number of observations in the Japanese corpora is insufficient due to inconsistent and missing MOR tagging.
